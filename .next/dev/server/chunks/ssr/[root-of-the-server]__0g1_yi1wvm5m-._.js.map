@@ -1,0 +1,7 @@
+{
+  "version": 3,
+  "sources": [],
+  "sections": [
+    {"offset": {"line": 19, "column": 0}, "map": {"version":3,"sources":["file:///C:/Users/h/Desktop/2026-projects/checkride/app/favicon.ico.mjs%20(structured%20image%20object)"],"sourcesContent":["import src from \"IMAGE\";\nexport default { src, width: 48, height: 48 }\n"],"names":["src","width","height"],"mappings":";;;;AAAA;;uCACe;IAAEA,KAAAA,mIAAG;IAAEC,OAAO;IAAIC,QAAQ;AAAG"}},
+    {"offset": {"line": 34, "column": 0}, "map": {"version":3,"sources":["file:///C:/Users/h/Desktop/2026-projects/checkride/app/page.tsx"],"sourcesContent":["export default function Home() {\n  return (\n    <main className=\"mx-auto flex w-full max-w-[1120px] flex-1 flex-col justify-center px-6 py-24\">\n      <h1 className=\"font-[family-name:var(--font-instrument-serif)] text-[clamp(2.5rem,6vw,4.5rem)] leading-none tracking-tight text-ink\">\n        LaunchCheck\n      </h1>\n      <p className=\"mt-4 max-w-[68ch] text-lg text-ink-muted\">\n        Potential launch-readiness risks for a live site or public GitHub repo — plain English,\n        severity-ranked. Not a security guarantee.\n      </p>\n    </main>\n  );\n}\n"],"names":["Home","className"],"mappings":";;;;;;AAAe,SAASA;IACtB,qBACE,uVAAC;QAAKC,WAAU;;0BACd,uVAAC;gBAAGA,WAAU;0BAAuH;;;;;;0BAGrI,uVAAC;gBAAEA,WAAU;0BAA2C;;;;;;;;;;;;AAM9D"}}]
+}

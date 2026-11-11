@@ -1,0 +1,6 @@
+{
+  "version": 3,
+  "sources": [],
+  "sections": [
+    {"offset": {"line": 46, "column": 0}, "map": {"version":3,"sources":["file:///C:/Users/h/Desktop/2026-projects/checkride/components/theme-provider.tsx"],"sourcesContent":["\"use client\";\n\nimport { ThemeProvider as NextThemesProvider } from \"next-themes\";\nimport type * as React from \"react\";\n\nexport function ThemeProvider({\n  children,\n  ...props\n}: React.ComponentProps<typeof NextThemesProvider>) {\n  return <NextThemesProvider {...props}>{children}</NextThemesProvider>;\n}\n"],"names":["ThemeProvider","children","props"],"mappings":";;;;;AAEA;AAFA;;;AAKO,SAASA,cAAc,EAC5BC,QAAQ,EACR,GAAGC,OAC6C;IAChD,qBAAO,uVAAC,0QAAkB;QAAE,GAAGA,KAAK;kBAAGD;;;;;;AACzC"}}]
+}
