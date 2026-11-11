@@ -1,7 +1,9 @@
+import dns from "node:dns";
 import http from "node:http";
+import https from "node:https";
 import type { AddressInfo, LookupFunction } from "node:net";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { safeFetch } from "@/lib/scanner/safe-fetch";
+import { resolveEffectiveOptions, safeFetch } from "@/lib/scanner/safe-fetch";
 import { isBlockedIp, validateTargetUrl } from "@/lib/scanner/url-validation";
 
 const APP_URL = "https://launchcheck.example";
@@ -212,26 +214,35 @@ describe("safeFetch DNS and connect-time checks", () => {
     }
   });
 
-  it("pins the validated address so a rebound private IP is not used for connect", async () => {
-    let calls = 0;
+  it("passes a pinned lookup that keeps returning the validated IP", async () => {
+    let resolverCalls = 0;
     const { lookup } = mockLookup(() => {
-      calls += 1;
-      return calls === 1 ? "8.8.8.8" : "127.0.0.1";
+      resolverCalls += 1;
+      return resolverCalls === 1 ? "8.8.8.8" : "127.0.0.1";
     });
 
-    const result = await safeFetch("https://rebind.example/", {
-      lookup,
-      appUrl: APP_URL,
-      timeoutMs: 500,
-    });
+    let pinnedLookup: LookupFunction | undefined;
+    const spy = vi.spyOn(https, "request").mockImplementation(((opts: https.RequestOptions) => {
+      pinnedLookup = opts.lookup as LookupFunction;
+      throw new Error("stop");
+    }) as unknown as typeof https.request);
 
-    // First lookup returned a public IP and was pinned; we never connect via the rebound private IP.
-    expect(result.ok).toBe(false);
-    if (!result.ok) {
-      expect(result.reason).toBe("network_error");
-      expect(result.message).not.toMatch(/127\.0\.0\.1/);
-    }
-    expect(calls).toBe(1);
+    // The mocked request throws before any connection is made, so safeFetch rejects.
+    await safeFetch("https://rebind.example/", { lookup, appUrl: APP_URL, timeoutMs: 500 }).catch(
+      () => undefined,
+    );
+    spy.mockRestore();
+
+    expect(resolverCalls).toBe(1);
+    expect(pinnedLookup).toBeDefined();
+    const address = await new Promise<string>((resolve) => {
+      (pinnedLookup as (h: string, o: object, cb: (e: null, a: string) => void) => void)(
+        "rebind.example",
+        {},
+        (_e, a) => resolve(a),
+      );
+    });
+    expect(address).toBe("8.8.8.8");
   });
 
   it("allows a hostname that resolves only to a public address (allowed counterpart)", async () => {
@@ -454,9 +465,11 @@ describe("safeFetch redirects, size, timeout, headers", () => {
   });
 
   it("does not send cookies or authorization headers", async () => {
-    let seen: http.IncomingHttpHeaders | null = null;
+    // Capture on an object property: TypeScript narrows a bare `let seen = null`
+    // to `never` after callback assignment, which caused TS2339 errors.
+    const captured: { headers?: http.IncomingHttpHeaders } = {};
     const fixture = await listen((req, res) => {
-      seen = req.headers;
+      captured.headers = req.headers;
       res.writeHead(200);
       res.end("hdr");
     });
@@ -469,11 +482,11 @@ describe("safeFetch redirects, size, timeout, headers", () => {
         timeoutMs: 2000,
       });
       expect(result.ok).toBe(true);
-      expect(seen).not.toBeNull();
-      expect(seen?.cookie).toBeUndefined();
-      expect(seen?.authorization).toBeUndefined();
-      expect(seen?.["user-agent"]).toBe(`LaunchCheckBot/1.0 (+${APP_URL}/bot)`);
-      expect(seen?.["accept-encoding"]).toBe("identity");
+      expect(captured.headers).toBeDefined();
+      expect(captured.headers?.cookie).toBeUndefined();
+      expect(captured.headers?.authorization).toBeUndefined();
+      expect(captured.headers?.["user-agent"]).toBe(`LaunchCheckBot/1.0 (+${APP_URL}/bot)`);
+      expect(captured.headers?.["accept-encoding"]).toBe("identity");
     } finally {
       await fixture.close();
     }
@@ -544,5 +557,39 @@ describe("DNS rebinding at connect time", () => {
     } finally {
       await fixture.close();
     }
+  });
+});
+
+describe("resolveEffectiveOptions", () => {
+  const evil = {
+    checkIp: () => false,
+    lookup: (() => {}) as unknown as LookupFunction,
+    connectPort: 1234,
+    timeoutMs: 600_000,
+    maxBytes: 10 ** 9,
+    maxRedirects: 50,
+  };
+
+  it("ignores test-only overrides and clamps limits in production", () => {
+    const eff = resolveEffectiveOptions(evil, "production");
+    expect(eff.checkIp("127.0.0.1")).toBe(true);
+    expect(eff.lookupFn).toBe(dns.lookup);
+    expect(eff.connectPort).toBeUndefined();
+    expect(eff.timeoutMs).toBe(10_000);
+    expect(eff.maxBytes).toBe(5 * 1024 * 1024);
+    expect(eff.maxRedirects).toBe(3);
+  });
+
+  it("honors overrides only when NODE_ENV is test (allowed counterpart)", () => {
+    const eff = resolveEffectiveOptions(evil, "test");
+    expect(eff.checkIp("127.0.0.1")).toBe(false);
+    expect(eff.connectPort).toBe(1234);
+  });
+
+  it("lets callers lower limits in any environment (allowed counterpart)", () => {
+    const eff = resolveEffectiveOptions({ timeoutMs: 500, maxBytes: 100, maxRedirects: 1 }, "production");
+    expect(eff.timeoutMs).toBe(500);
+    expect(eff.maxBytes).toBe(100);
+    expect(eff.maxRedirects).toBe(1);
   });
 });

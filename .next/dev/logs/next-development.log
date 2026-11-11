@@ -1,4 +1,3 @@
-{"timestamp":"00:00:05.739","source":"Server","level":"LOG","message":"- Cache Components enabled"}
-{"timestamp":"00:00:05.740","source":"Server","level":"LOG","message":"- Partial Prefetching enabled"}
-{"timestamp":"00:00:05.740","source":"Server","level":"LOG","message":""}
-{"timestamp":"00:00:22.674","source":"Server","level":"LOG","message":"○ Compiling / ..."}
+{"timestamp":"00:00:04.521","source":"Server","level":"LOG","message":"- Cache Components enabled"}
+{"timestamp":"00:00:04.521","source":"Server","level":"LOG","message":"- Partial Prefetching enabled"}
+{"timestamp":"00:00:04.521","source":"Server","level":"LOG","message":""}

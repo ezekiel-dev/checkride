@@ -5,6 +5,14 @@
  * This module must never run on the Edge runtime — it uses node:http, node:https,
  * node:dns, and node:net (BlockList). Call it only from Node.js Route Handlers,
  * Server Actions, or Inngest functions.
+ *
+ * Security model:
+ *  - Every URL (and every redirect hop) goes through validateTargetUrl.
+ *  - DNS is resolved once per hop; EVERY returned address is checked with isBlockedIp.
+ *  - The connection uses a pinned lookup that returns only the address that was
+ *    checked, so DNS rebinding cannot swap the IP between check and connect.
+ *  - Test-only options (lookup, checkIp, connectPort, appUrl) are ignored unless
+ *    NODE_ENV === "test", and limits (timeout, size, redirects) can only be lowered.
  */
 
 import dns from "node:dns";
@@ -18,6 +26,7 @@ export type SafeFetchReason =
   | "blocked_ip"
   | "too_many_redirects"
   | "timeout"
+  // Reserved: oversized bodies are currently reported via `truncated: true`.
   | "too_large"
   | "network_error";
 
@@ -42,22 +51,27 @@ export type SafeFetchMethod = "GET" | "HEAD";
 
 export type SafeFetchOptions = {
   method?: SafeFetchMethod;
+  /** Can only LOWER the 10s default. */
   timeoutMs?: number;
+  /** Can only LOWER the 5 MB default. */
   maxBytes?: number;
+  /** Can only LOWER the default of 3. */
   maxRedirects?: number;
+  /** Test-only: ignored unless NODE_ENV === "test". */
   appUrl?: string;
   /**
-   * Injectable DNS lookup (tests). Production uses dns.lookup.
+   * Test-only: injectable DNS lookup. Ignored unless NODE_ENV === "test".
    * Every address returned is checked with isBlockedIp before connect.
    */
   lookup?: LookupFunction;
   /**
-   * Injectable IP block predicate (tests only). Defaults to isBlockedIp.
+   * Test-only: injectable IP block predicate. Ignored unless NODE_ENV === "test".
    */
   checkIp?: (ip: string) => boolean;
   /**
-   * Test-only: TCP port to connect to after URL validation.
-   * Lets fixtures listen on an ephemeral port while the validated URL stays on 80/443.
+   * Test-only: TCP port to connect to after URL validation. Ignored unless
+   * NODE_ENV === "test". Lets fixtures listen on an ephemeral port while the
+   * validated URL stays on 80/443.
    */
   connectPort?: number;
   signal?: AbortSignal;
@@ -70,6 +84,47 @@ const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
 
 type AddressEntry = { address: string; family: number };
 
+type RequestOutcome =
+  | {
+      kind: "response";
+      status: number;
+      headers: http.IncomingHttpHeaders;
+      body: Buffer;
+      truncated: boolean;
+    }
+  | { kind: "error"; reason: SafeFetchReason; message: string };
+
+/**
+ * Decide which options actually take effect.
+ * - Production ignores test-only overrides entirely.
+ * - Limits can only be lowered below the defaults, never raised.
+ * Exported so it can be unit tested without touching the network.
+ */
+export function resolveEffectiveOptions(options: SafeFetchOptions, nodeEnv: string | undefined) {
+  const isTest = nodeEnv === "test";
+
+  const clamp = (value: number | undefined, max: number): number =>
+    typeof value === "number" && Number.isFinite(value) && value > 0 ? Math.min(value, max) : max;
+
+  const requestedRedirects = options.maxRedirects;
+  const maxRedirects =
+    typeof requestedRedirects === "number" &&
+    Number.isInteger(requestedRedirects) &&
+    requestedRedirects >= 0
+      ? Math.min(requestedRedirects, DEFAULT_MAX_REDIRECTS)
+      : DEFAULT_MAX_REDIRECTS;
+
+  return {
+    timeoutMs: clamp(options.timeoutMs, DEFAULT_TIMEOUT_MS),
+    maxBytes: clamp(options.maxBytes, DEFAULT_MAX_BYTES),
+    maxRedirects,
+    lookupFn: (isTest ? options.lookup : undefined) ?? dns.lookup,
+    checkIp: (isTest ? options.checkIp : undefined) ?? isBlockedIp,
+    connectPort: isTest ? options.connectPort : undefined,
+    appUrl: (isTest ? options.appUrl : undefined) ?? process.env.NEXT_PUBLIC_APP_URL,
+  };
+}
+
 function getUserAgent(appUrl: string | undefined): string {
   const base =
     appUrl && appUrl.trim() !== ""
@@ -80,6 +135,32 @@ function getUserAgent(appUrl: string | undefined): string {
 
 function safeNetworkMessage(): string {
   return "The request failed due to a network error.";
+}
+
+function timeoutError(): SafeFetchError {
+  return { ok: false, reason: "timeout", message: "The request timed out." };
+}
+
+/** Reject as soon as the signal aborts, so slow DNS cannot outlive the overall timeout. */
+function withAbort<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
+  return new Promise((resolve, reject) => {
+    if (signal.aborted) {
+      reject(new Error("aborted"));
+      return;
+    }
+    const onAbort = () => reject(new Error("aborted"));
+    signal.addEventListener("abort", onAbort, { once: true });
+    promise.then(
+      (value) => {
+        signal.removeEventListener("abort", onAbort);
+        resolve(value);
+      },
+      (error) => {
+        signal.removeEventListener("abort", onAbort);
+        reject(error);
+      },
+    );
+  });
 }
 
 function lookupAll(hostname: string, lookupFn: LookupFunction): Promise<AddressEntry[]> {
@@ -155,14 +236,18 @@ async function resolveAndPin(
   hostname: string,
   lookupFn: LookupFunction,
   checkIp: (ip: string) => boolean,
+  signal: AbortSignal,
 ): Promise<{ ok: true; pinned: AddressEntry } | SafeFetchError> {
   let addresses: AddressEntry[];
   try {
-    addresses = await lookupAll(hostname, lookupFn);
+    addresses = await withAbort(lookupAll(hostname, lookupFn), signal);
   } catch {
-    return { ok: false, reason: "network_error", message: safeNetworkMessage() };
+    return signal.aborted
+      ? timeoutError()
+      : { ok: false, reason: "network_error", message: safeNetworkMessage() };
   }
 
+  // Block if ANY returned address is disallowed (defeats mixed public/private answers).
   for (const entry of addresses) {
     if (checkIp(entry.address)) {
       return {
@@ -272,16 +357,7 @@ function requestOnce(
     connectPort?: number;
     signal: AbortSignal;
   },
-): Promise<
-  | {
-      kind: "response";
-      status: number;
-      headers: http.IncomingHttpHeaders;
-      body: Buffer;
-      truncated: boolean;
-    }
-  | { kind: "error"; reason: SafeFetchReason; message: string }
-> {
+): Promise<RequestOutcome> {
   return new Promise((resolve) => {
     if (options.signal.aborted) {
       resolve({ kind: "error", reason: "timeout", message: "The request timed out." });
@@ -291,17 +367,7 @@ function requestOnce(
     const transport = url.protocol === "https:" ? https : http;
     let settled = false;
 
-    const settle = (
-      result:
-        | {
-            kind: "response";
-            status: number;
-            headers: http.IncomingHttpHeaders;
-            body: Buffer;
-            truncated: boolean;
-          }
-        | { kind: "error"; reason: SafeFetchReason; message: string },
-    ) => {
+    const settle = (result: RequestOutcome) => {
       if (settled) {
         return;
       }
@@ -325,23 +391,39 @@ function requestOnce(
         port,
         path: `${url.pathname}${url.search}`,
         method: options.method,
+        // Never reuse pooled sockets across requests or hops.
+        agent: false,
+        // Node sets Host from hostname/port. No cookies or auth headers are ever sent.
         headers: {
           Accept: "*/*",
           "Accept-Encoding": "identity",
           "User-Agent": options.userAgent,
-          Host: url.host,
           Connection: "close",
         },
         lookup: options.pinnedLookup,
         timeout: options.timeoutMs,
       },
       (response) => {
-        // Redirects are handled by the caller; still read/discard body for non-redirects.
+        const status = response.statusCode ?? 0;
+
+        // Redirect bodies are never needed: drop the connection instead of reading up to 5 MB.
+        if (REDIRECT_STATUSES.has(status)) {
+          response.destroy();
+          settle({
+            kind: "response",
+            status,
+            headers: response.headers,
+            body: Buffer.alloc(0),
+            truncated: false,
+          });
+          return;
+        }
+
         void readBody(response, options.maxBytes, options.signal)
           .then(({ body, truncated }) => {
             settle({
               kind: "response",
-              status: response.statusCode ?? 0,
+              status,
               headers: response.headers,
               body,
               truncated,
@@ -376,8 +458,9 @@ function requestOnce(
 }
 
 /**
- * Fetch a URL with SSRF protections: URL validation, DNS IP checks at connect time,
- * manual redirects (max 3), 10s timeout, 5 MB body cap, identity encoding only.
+ * Fetch a URL with SSRF protections: URL validation, DNS IP checks pinned to the
+ * connection, manual redirects (max 3), 10s timeout covering DNS and the whole
+ * redirect chain, 5 MB streamed body cap, identity encoding only.
  */
 export async function safeFetch(
   input: string,
@@ -392,12 +475,8 @@ export async function safeFetch(
     };
   }
 
-  const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
-  const maxBytes = options.maxBytes ?? DEFAULT_MAX_BYTES;
-  const maxRedirects = options.maxRedirects ?? DEFAULT_MAX_REDIRECTS;
-  const lookupFn = options.lookup ?? dns.lookup;
-  const checkIp = options.checkIp ?? isBlockedIp;
-  const appUrl = options.appUrl ?? process.env.NEXT_PUBLIC_APP_URL;
+  const { timeoutMs, maxBytes, maxRedirects, lookupFn, checkIp, connectPort, appUrl } =
+    resolveEffectiveOptions(options, process.env.NODE_ENV);
   const userAgent = getUserAgent(appUrl);
 
   const controller = new AbortController();
@@ -407,7 +486,7 @@ export async function safeFetch(
   if (options.signal) {
     if (options.signal.aborted) {
       clearTimeout(timeout);
-      return { ok: false, reason: "timeout", message: "The request timed out." };
+      return timeoutError();
     }
     options.signal.addEventListener("abort", onExternalAbort, { once: true });
   }
@@ -427,7 +506,7 @@ export async function safeFetch(
       }
 
       const url = validated.url;
-      const pinned = await resolveAndPin(url.hostname, lookupFn, checkIp);
+      const pinned = await resolveAndPin(url.hostname, lookupFn, checkIp, controller.signal);
       if (!pinned.ok) {
         return pinned;
       }
@@ -438,7 +517,7 @@ export async function safeFetch(
         maxBytes,
         userAgent,
         pinnedLookup: createPinnedLookup(pinned.pinned),
-        connectPort: options.connectPort,
+        connectPort,
         signal: controller.signal,
       });
 
@@ -477,6 +556,7 @@ export async function safeFetch(
           };
         }
 
+        // Re-validated (scheme, host, port, IP) at the top of the next loop iteration.
         current = nextUrl.toString();
         continue;
       }
