@@ -182,11 +182,14 @@ const ExplainedFinding = z.object({
 ## 7. Security requirements (critical, this is a security tool)
 
 1. **SSRF protection** for all user-supplied URLs:
-   - Allow only `http` and `https`, ports 80/443.
-   - Resolve DNS first and **block private, loopback, link-local, and cloud-metadata ranges** (10/8, 172.16/12, 192.168/16, 127/8, 169.254/16, ::1, fc00::/7, fe80::/10).
-   - Re-validate on every redirect hop (max 3 redirects) and pin the resolved IP for the request.
-   - Timeout 10s, max response size 5 MB, max 15 bundle files per scan.
-2. **Abuse controls:** rate limit anonymous scans (e.g., 3/hour/IP) and signed-in users (e.g., 20/day). Block scanning the same domain more than N times per day.
+   - Allow only `http` and `https`, ports 80/443. Reject URLs containing credentials, IP literals (including decimal/hex forms), `localhost`, and `.local`/`.localhost`/`.internal`/`.lan` hostnames.
+   - **Block private, loopback, link-local, reserved, multicast, and cloud-metadata ranges**, IPv4 and IPv6, including IPv4-mapped IPv6 addresses. Minimum list: 0/8, 10/8, 100.64/10, 127/8, 169.254/16 (cloud metadata), 172.16/12, 192.0.0/24, 192.0.2/24, 192.168/16, 198.18/15, 198.51.100/24, 203.0.113/24, 224/4, 240/4, `::`, `::1`, fc00::/7, fe80::/10, ff00::/8, 2001:db8::/32, fd00:ec2::254. Use Node's built-in `node:net` `BlockList`.
+   - **Validate at connection time:** use a custom DNS `lookup` on the actual connection, check every returned address, and block if any is disallowed. This defeats DNS rebinding because the checked IP is the connected IP.
+   - Handle redirects manually (max 3 hops) and re-validate URL and IP on every hop. Never follow redirects automatically.
+   - Timeout 10s, max response size 5 MB enforced while streaming (including decompressed size), max 15 bundle files per scan. Only GET and HEAD. Never forward cookies or auth headers.
+   - Errors use safe reason codes (`blocked_url`, `blocked_ip`, `too_many_redirects`, `timeout`, `too_large`, `network_error`) and never leak internal IPs or stack traces.
+   - The fetcher runs only on the Node.js runtime, never Edge.
+2. **Abuse controls:** rate limit anonymous scans to 3/hour/IP and signed-in users to 20/day. Block scanning the same domain more than 5 times per day. In production, if the rate-limit store is unavailable, **fail closed** (503). An in-memory limiter is allowed only when `NODE_ENV` is not production.
 3. **Ownership note:** The UI must state "Only scan sites and repos you own or have permission to test" and require a checkbox before scanning.
 4. **User-Agent:** `LaunchCheckBot/1.0 (+https://<domain>/bot)`; add a `/bot` page explaining what it does and how to opt out. Respect `robots.txt` disallow for `LaunchCheckBot` for site fetches beyond the home page.
 5. No scanning of `localhost`, IPs, or the app's own domain.
@@ -204,8 +207,10 @@ users            id, email, name, created_at          (managed by Better Auth)
 sessions/accounts                                      (managed by Better Auth)
 
 scans
-  id (uuid), user_id (nullable), anon_token (nullable), site_url (nullable), repo_url (nullable),
-  status (queued|running|completed|failed), score (int, nullable), grade (text, nullable),
+  id (uuid), user_id (nullable), anon_token_hash (nullable, SHA-256 of the cookie token; never store the raw token),
+  site_url (nullable), repo_url (nullable),
+  status (queued|running|completed|failed), step (text, nullable; current pipeline step for the progress UI),
+  score (int, nullable), grade (text, nullable),
   unlocked (bool, default false), error (text, nullable),
   ai_input_tokens, ai_output_tokens, created_at, completed_at
 
@@ -421,11 +426,24 @@ Complete one phase at a time. Open a PR per phase. CI must be green before movin
 - Neon DB + Drizzle schema + first migration. `.env.example`. CI workflow. Deployed to Vercel preview.
 - **Done when:** `pnpm lint && pnpm typecheck && pnpm test && pnpm build` pass in CI and the home page renders on the preview URL.
 
-### Phase 1: Safe fetching and scan shell
-- `safe-fetch.ts` with full SSRF protections plus tests (private IPs, redirects to private IPs, DNS rebinding case, oversized body, timeout).
-- Landing page + scan form (Zod, ownership checkbox) + `POST /api/scans` + rate limiting + Inngest pipeline skeleton that moves a scan from queued to completed with no checks.
-- Progress page with polling.
-- **Done when:** submitting a URL creates a scan row, runs the pipeline, and the UI shows completion. SSRF tests pass.
+### Phase 1: Safe fetching and scan shell (split into two sessions)
+
+Run 1A and 1B as separate agent sessions and separate PRs. Merge 1A and review it by hand before starting 1B.
+
+#### Phase 1A: SSRF-safe fetch layer (no UI, no API, no database changes)
+- `lib/scanner/safe-fetch.ts` (and `url-validation.ts` if cleaner) implementing every rule in section 7.1: `validateTargetUrl`, `isBlockedIp`, and `safeFetch` with connection-time DNS validation, manual redirects, timeout, streamed size limit, and safe error codes.
+- Unit tests using local servers and mocked DNS. Every "blocked" test has an "allowed" counterpart. Cover: bad schemes, credentials, bad ports, IP literals in all forms, localhost and `.local` names, the app's own host, every blocked range, IPv4-mapped IPv6, mixed public/private DNS answers, DNS rebinding, redirects to private targets, more than 3 redirects, timeout, oversized body, and no cookies or auth headers sent.
+- **Done when:** lint, typecheck, test, and build pass, and a human has reviewed `safe-fetch.ts` against the checklist in section 7.1.
+
+#### Phase 1B: Scan form, API, rate limiting, pipeline skeleton, progress page
+- Shared Zod schemas in `lib/scanner/validation.ts` (site URL via `validateTargetUrl`; repo URL strictly `https://github.com/<owner>/<repo>`; mode `site|repo|both`; `acceptedOwnership` must be `true`).
+- `POST /api/scans`: validate, rate limit, create a `scans` row (`queued`), set an httpOnly, SameSite=Lax cookie (Secure in production) holding a random 32-byte token whose SHA-256 hash is stored in `anon_token_hash`, send Inngest event `scan/requested`, return `{ id }`. Generic error messages only.
+- `GET /api/scans/[id]`: returns `{ id, status, step, createdAt, completedAt }` only to the holder of the matching cookie; otherwise 404.
+- `lib/ratelimit.ts` with Upstash sliding window per section 7.2, plus unit tests.
+- Inngest function `scan.run` with steps `validate-and-resolve`, `mark-running`, `finalize`, updating `scans.step`. No checks yet. Serve at `/api/inngest`. New Drizzle migration for the `step` and `anon_token_hash` columns.
+- UI: landing hero and scan bar (section 11.5 and 11.6), and `/scan/[id]` with TanStack Query polling every 2s and the pre-flight sequence (reduced-motion aware, `aria-live="polite"`).
+- Tests: validation schemas, rate limiter, and the `POST /api/scans` handler (valid, invalid, missing ownership, rate-limited, cookie set) with DB and Inngest mocked; one Playwright test (not in CI).
+- **Done when:** submitting a URL creates a scan row, the Inngest function runs, the status moves queued, running, completed, and the progress page shows it. Manual test: bad inputs (`http://localhost`, `http://169.254.169.254`, `ftp://x.com`, unchecked ownership, four fast submissions) are rejected.
 
 ### Phase 2: Site checks
 - Implement all checks in 4.1 with fixtures and unit tests.

@@ -33,6 +33,10 @@ Before opening any PR, all of these must pass: `pnpm lint && pnpm typecheck && p
 - Keep commits small and focused. Do not mix refactors with features.
 - PR description must include: what was built, how to verify it, tests added, known limitations.
 - At the end of each phase, stop and report: what was done, what was tested, known limitations, next phase.
+- **Do not push, deploy, or open pull requests unless explicitly asked.** Commit locally on the current branch and stop. The human handles Git remotes and PRs.
+- Some phases are split into parts (for example 1A and 1B). Do only the part named in the prompt, and treat the matching entry in `SPEC.md` section 14 as authoritative.
+- Run `pnpm exec biome check --write .` before the final check run, so formatting never fails CI.
+- When a prompt and `SPEC.md` disagree, stop and report the conflict instead of guessing.
 
 ## Code standards
 - TypeScript strict. No `any` without an explanatory comment. No `@ts-ignore` without a linked reason.
