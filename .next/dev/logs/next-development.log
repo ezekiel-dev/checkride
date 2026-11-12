@@ -1,4 +1,0 @@
-{"timestamp":"00:00:04.521","source":"Server","level":"LOG","message":"- Cache Components enabled"}
-{"timestamp":"00:00:04.521","source":"Server","level":"LOG","message":"- Partial Prefetching enabled"}
-{"timestamp":"00:00:04.521","source":"Server","level":"LOG","message":""}
-{"timestamp":"00:21:09.298","source":"Server","level":"LOG","message":"✓ Compiled in 5.1s"}
