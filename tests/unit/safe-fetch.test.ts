@@ -587,7 +587,10 @@ describe("resolveEffectiveOptions", () => {
   });
 
   it("lets callers lower limits in any environment (allowed counterpart)", () => {
-    const eff = resolveEffectiveOptions({ timeoutMs: 500, maxBytes: 100, maxRedirects: 1 }, "production");
+    const eff = resolveEffectiveOptions(
+      { timeoutMs: 500, maxBytes: 100, maxRedirects: 1 },
+      "production",
+    );
     expect(eff.timeoutMs).toBe(500);
     expect(eff.maxBytes).toBe(100);
     expect(eff.maxRedirects).toBe(1);

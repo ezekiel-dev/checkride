@@ -20,9 +20,29 @@ Required for local app/db usage:
 
 ```bash
 pnpm install
-pnpm db:migrate   # after DATABASE_URL is set
+pnpm db:migrate   # applies drizzle/ migrations (needs DATABASE_URL)
 pnpm dev
 ```
+
+## Running a scan locally (Phase 1B)
+
+Scans are queued through [Inngest](https://www.inngest.com/). To process them locally:
+
+1. Start the Inngest dev server in a second terminal:
+
+```bash
+npx inngest-cli@latest dev
+```
+
+2. Point it at the app (default `http://localhost:3000/api/inngest`; the CLI usually syncs apps automatically — check `http://localhost:8288`).
+
+3. Open `http://localhost:3000`, fill in the scan form, and submit. The app redirects to `/scan/<id>`, which polls every 2 seconds until the scan completes.
+
+Notes:
+
+- `UPSTASH_REDIS_REST_URL` / `UPSTASH_REDIS_REST_TOKEN` are optional locally — an in-memory rate limiter (3 scans/hour/IP, 5 scans/day/domain) is used instead. They are **required in production**.
+- `INNGEST_EVENT_KEY` / `INNGEST_SIGNING_KEY` are optional locally with the dev server; **required in production**.
+- Apply new migrations with `pnpm db:migrate` after pulling schema changes (generate them with `pnpm db:generate`).
 
 ## Environment variables
 
