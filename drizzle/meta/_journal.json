@@ -8,6 +8,13 @@
       "when": 1794318403637,
       "tag": "0000_secret_jubilee",
       "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "7",
+      "when": 1794394069438,
+      "tag": "0001_anon_token_hash_step",
+      "breakpoints": true
     }
   ]
 }

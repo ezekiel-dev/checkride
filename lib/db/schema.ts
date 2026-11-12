@@ -42,10 +42,11 @@ export const scans = pgTable(
   {
     id: uuid("id").defaultRandom().primaryKey(),
     userId: uuid("user_id"),
-    anonToken: text("anon_token"),
+    anonTokenHash: text("anon_token_hash"),
     siteUrl: text("site_url"),
     repoUrl: text("repo_url"),
     status: scanStatusEnum("status").notNull().default("queued"),
+    step: text("step"),
     score: integer("score"),
     grade: text("grade"),
     unlocked: boolean("unlocked").notNull().default(false),
