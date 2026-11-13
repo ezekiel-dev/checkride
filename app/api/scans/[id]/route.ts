@@ -3,6 +3,7 @@ import { type NextRequest, NextResponse } from "next/server";
 import { getDb } from "@/lib/db";
 import { scans } from "@/lib/db/schema";
 import { ANON_TOKEN_COOKIE, anonTokenHashEquals, hashAnonToken } from "@/lib/scan-token";
+import { getFindingSummary } from "@/lib/scanner/persist";
 import type { ScanMode } from "@/lib/scanner/steps";
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -59,17 +60,24 @@ export async function GET(request: NextRequest, context: { params: Promise<{ id:
       return notFound();
     }
 
-    return NextResponse.json(
-      {
-        id: scan.id,
-        status: scan.status,
-        step: scan.step,
-        mode: scanMode(scan.siteUrl, scan.repoUrl),
-        createdAt: scan.createdAt ? scan.createdAt.toISOString() : null,
-        completedAt: scan.completedAt ? scan.completedAt.toISOString() : null,
-      },
-      { headers: NO_STORE },
-    );
+    const body: Record<string, unknown> = {
+      id: scan.id,
+      status: scan.status,
+      step: scan.step,
+      mode: scanMode(scan.siteUrl, scan.repoUrl),
+      createdAt: scan.createdAt ? scan.createdAt.toISOString() : null,
+      completedAt: scan.completedAt ? scan.completedAt.toISOString() : null,
+    };
+
+    // Completed scans also expose the finding summary. Evidence, locations,
+    // and every other findings column stay server-side.
+    if (scan.status === "completed") {
+      const summary = await getFindingSummary(db, id);
+      body.counts = summary.counts;
+      body.topFindings = summary.topFindings;
+    }
+
+    return NextResponse.json(body, { headers: NO_STORE });
   } catch {
     return NextResponse.json(
       { error: "Something went wrong. Please try again." },

@@ -4,6 +4,9 @@ import { z } from "zod";
 import { getDb } from "@/lib/db";
 import { scans } from "@/lib/db/schema";
 import { inngest } from "@/lib/inngest/client";
+import { productionFetcher } from "@/lib/scanner/fetcher";
+import { persistFindings } from "@/lib/scanner/persist";
+import { runSiteScan } from "@/lib/scanner/scan-site";
 import { STEP } from "@/lib/scanner/steps";
 import { validateTargetUrl } from "@/lib/scanner/url-validation";
 import { repoUrlField } from "@/lib/scanner/validation";
@@ -62,7 +65,7 @@ export const scanRun = inngest.createFunction(
     const { scanId } = parsedEvent.data.data;
     const db = getDb();
 
-    await step.run(STEP.validate, async () => {
+    const resolved = await step.run(STEP.validate, async () => {
       await setScanStep(db, scanId, STEP.validate);
 
       const [scan] = await db
@@ -94,6 +97,24 @@ export const scanRun = inngest.createFunction(
       await setScanStep(db, scanId, STEP.running);
       await db.update(scans).set({ status: "running" }).where(eq(scans.id, scanId));
     });
+
+    // Site scans only: snapshot, check, and persist inside ONE step so the
+    // step output stays small (never return the snapshot or bundle bodies).
+    const siteUrl = resolved.siteUrl;
+    if (siteUrl) {
+      await step.run(STEP.scanSite, async () => {
+        await setScanStep(db, scanId, STEP.scanSite);
+        const result = await runSiteScan({
+          siteUrl,
+          fetcher: productionFetcher,
+        });
+        if (!result.ok) {
+          throw new NonRetriableError("site_unreachable");
+        }
+        await persistFindings(db, scanId, result.findings);
+        return { findingCount: result.findings.length };
+      });
+    }
 
     await step.run(STEP.finalize, async () => {
       await setScanStep(db, scanId, STEP.finalize);
