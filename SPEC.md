@@ -137,6 +137,11 @@ interface RawFinding {
 - Prefer **false negatives over false positives**. Every heuristic finding must carry a `confidence` value and use "potential issue" language in the UI.
 - Each check has unit tests with positive and negative fixtures in `/fixtures`.
 - A failure in one check must never fail the whole scan. Record it as `check_errored` and continue.
+- **All network access goes through an injected fetcher.** Checks never import `safeFetch` directly. They receive `ctx.fetch(url)` (production: `safeFetch` with defaults), so tests can inject a fixture fetcher that uses the test-only `lookup`/`checkIp`/`connectPort` options against a local server.
+- **Fetch once, check many.** The pipeline builds one `SiteSnapshot` (home page response, headers, HTML, fetch time, same-origin script bodies) and checks are pure functions over it, except checks that explicitly need an extra request (for example `site.https.redirect`).
+- **Budgets:** whole snapshot phase at most 25 seconds; at most 15 same-origin script files; bundle fetch concurrency 4; each script capped by safeFetch's 5 MB limit (record `truncated`). When a budget is exhausted, skip the rest and record an `info` finding saying so; never fail the scan.
+- **robots.txt:** fetch `/robots.txt` once. If it disallows `LaunchCheckBot` (or `*`) for a path, do not fetch that path (the home page the user submitted is always fetched; scripts and extra paths are skipped with an `info` finding).
+- **Inngest step outputs must stay small.** Never return the snapshot, HTML, or bundle bodies from a `step.run` (step results are serialized and persisted). Fetch, check, and persist findings inside ONE step and return only small counts.
 
 ---
 
@@ -266,6 +271,8 @@ Function `scan.run`, triggered by event `scan/requested`. Steps (each `step.run`
 9. `finalize`: set status, score, grade. Send email if user is signed in.
 
 On unrecoverable error set `status = failed` with a safe error message.
+
+**Implemented pipeline as of Phase 2:** `validate-and-resolve`, `mark-running`, `scan-site` (only when a site URL exists: build snapshot, run site checks, replace this scan's findings rows, return only counts), `finalize`. Persisting findings is idempotent: delete the scan's existing findings, then insert, so retries never duplicate rows.
 
 ---
 
@@ -438,16 +445,36 @@ Run 1A and 1B as separate agent sessions and separate PRs. Merge 1A and review i
 #### Phase 1B: Scan form, API, rate limiting, pipeline skeleton, progress page
 - Shared Zod schemas in `lib/scanner/validation.ts` (site URL via `validateTargetUrl`; repo URL strictly `https://github.com/<owner>/<repo>`; mode `site|repo|both`; `acceptedOwnership` must be `true`).
 - `POST /api/scans`: validate, rate limit, create a `scans` row (`queued`), set an httpOnly, SameSite=Lax cookie (Secure in production) holding a random 32-byte token whose SHA-256 hash is stored in `anon_token_hash`, send Inngest event `scan/requested`, return `{ id }`. Generic error messages only.
-- `GET /api/scans/[id]`: returns `{ id, status, step, createdAt, completedAt }` only to the holder of the matching cookie; otherwise 404.
+- `GET /api/scans/[id]`: returns `{ id, status, step, mode, createdAt, completedAt }` only to the holder of the matching cookie; otherwise 404. From Phase 2A it also returns, once completed, `counts` (findings per severity) and `topFindings` (up to 3 `{ severity, title }`, highest severity first, titles only). Evidence, locations, and explanations are never returned before the paid unlock (Phase 5).
 - `lib/ratelimit.ts` with Upstash sliding window per section 7.2, plus unit tests.
 - Inngest function `scan.run` with steps `validate-and-resolve`, `mark-running`, `finalize`, updating `scans.step`. No checks yet. Serve at `/api/inngest`. New Drizzle migration for the `step` and `anon_token_hash` columns.
 - UI: landing hero and scan bar (section 11.5 and 11.6), and `/scan/[id]` with TanStack Query polling every 2s and the pre-flight sequence (reduced-motion aware, `aria-live="polite"`).
 - Tests: validation schemas, rate limiter, and the `POST /api/scans` handler (valid, invalid, missing ownership, rate-limited, cookie set) with DB and Inngest mocked; one Playwright test (not in CI).
 - **Done when:** submitting a URL creates a scan row, the Inngest function runs, the status moves queued, running, completed, and the progress page shows it. Manual test: bad inputs (`http://localhost`, `http://169.254.169.254`, `ftp://x.com`, unchecked ownership, four fast submissions) are rejected.
 
-### Phase 2: Site checks
-- Implement all checks in 4.1 with fixtures and unit tests.
-- **Done when:** scanning a deliberately flawed fixture site (included in `/fixtures/vulnerable-site`, served locally in tests) yields the expected findings, and scanning a well-configured site yields few or none.
+### Phase 2: Site checks (split into three sessions)
+
+Run 2A, 2B, 2C as separate agent sessions and separate PRs, in order.
+
+#### Phase 2A: check framework, site snapshot, persistence (one exemplar check)
+- `lib/scanner/types.ts` (`Check`, `RawFinding`, `ScanContext`, `SiteSnapshot`), `lib/scanner/registry.ts`, `lib/scanner/runner.ts` (runs checks in parallel with a 5s per-check timeout, isolates errors as `check_errored` info findings, and never throws).
+- `lib/scanner/redact.ts` (first 4 and last 2 characters kept, rest masked) with tests.
+- `lib/scanner/robots.ts` minimal robots.txt parser (no new dependency) with tests.
+- `lib/scanner/snapshot.ts` building the `SiteSnapshot` through the injected fetcher under the budgets in 4.3.
+- Findings persistence (idempotent) and the `scan-site` pipeline step; update `lib/scanner/steps.ts` and its tests.
+- `GET /api/scans/[id]` returns `counts` and `topFindings`; the completed page shows them with a note that the full report arrives later.
+- Exemplar check `site.headers.hsts`, plus `tests/helpers/fixture-server.ts` (local server with a test fetcher) and `/fixtures/vulnerable-site` and `/fixtures/clean-site`.
+- **Done when:** a site-only scan produces persisted findings through the real pipeline; repo-only scans skip the new step; unit tests pass.
+
+#### Phase 2B: header, transport, and cookie checks
+- `site.headers.csp`, `site.headers.frame`, `site.headers.misc`, `site.https.redirect` (uses `ctx.fetch` on the `http://` URL and inspects `finalUrl`, no change to safe-fetch), `site.cookies`.
+- Positive and negative fixtures for each.
+- **Done when:** the vulnerable fixture yields the expected findings for these checks and the clean fixture yields none of them.
+
+#### Phase 2C: bundle secrets, backend detection, performance
+- `lib/scanner/patterns/secrets.ts` (shared later by repo checks), `site.bundle.secrets`, `site.backend.supabase` (decode JWT payload; `service_role` is critical, `anon` is info), `site.backend.firebase`, `site.perf.basic`.
+- Integration tests: scanning `/fixtures/vulnerable-site` yields the expected set of findings; scanning `/fixtures/clean-site` yields few or none.
+- **Done when:** the integration tests pass and a real scan of a known site through the UI shows counts and top titles.
 
 ### Phase 3: Repo checks
 - Octokit tree fetch with caps (max 300 files, 200 KB per file, skip binaries/`node_modules`/lockfile content for secret scan).

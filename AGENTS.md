@@ -37,6 +37,9 @@ Before opening any PR, all of these must pass: `pnpm lint && pnpm typecheck && p
 - Some phases are split into parts (for example 1A and 1B). Do only the part named in the prompt, and treat the matching entry in `SPEC.md` section 14 as authoritative.
 - Run `pnpm exec biome check --write .` before the final check run, so formatting never fails CI.
 - When a prompt and `SPEC.md` disagree, stop and report the conflict instead of guessing.
+- **Inngest `step.run` results are serialized and persisted.** Never return large data (HTML, bundles, snapshots, file contents) from a step. Do the work and persist results inside one step and return only small summaries.
+- Scanner checks must never import `safeFetch` directly; they use the injected `ctx.fetch`. Do not modify `safe-fetch.ts` or `url-validation.ts` unless a prompt explicitly says so.
+- Do not put real secrets in fixtures. Use obviously fake values built at test time (for example `"sk_live_" + "x".repeat(24)`), so secret scanners and push protection do not flag the repo.
 
 ## Code standards
 - TypeScript strict. No `any` without an explanatory comment. No `@ts-ignore` without a linked reason.
