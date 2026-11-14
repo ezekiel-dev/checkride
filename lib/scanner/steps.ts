@@ -15,6 +15,7 @@ export type ScanMode = "site" | "repo" | "both";
 export const STEP = {
   validate: "validate-and-resolve",
   running: "mark-running",
+  scanSite: "scan-site",
   finalize: "finalize",
 } as const;
 
@@ -29,6 +30,7 @@ export const SCAN_STEPS: readonly ScanStepDef[] = [
   { id: "queued", label: "Queued", appliesTo: "always" },
   { id: STEP.validate, label: "Checking your URLs", appliesTo: "always" },
   { id: STEP.running, label: "Starting the scan", appliesTo: "always" },
+  { id: STEP.scanSite, label: "Scanning your site", appliesTo: "site" },
   { id: STEP.finalize, label: "Wrapping up", appliesTo: "always" },
 ];
 

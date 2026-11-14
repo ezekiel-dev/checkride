@@ -24,7 +24,32 @@ pnpm db:migrate   # applies drizzle/ migrations (needs DATABASE_URL)
 pnpm dev
 ```
 
-## Running a scan locally (Phase 1B)
+## How the scan pipeline works (Phase 2A)
+
+When a scan is requested, the Inngest function `scan.run` executes these steps:
+
+1. `validate-and-resolve` — re-validates the stored URLs.
+2. `mark-running` — marks the scan as running.
+3. `scan-site` *(site scans only)* — inside a single step it:
+   - fetches the home page once through the SSRF-safe fetcher (`safeFetch`),
+   - fetches `/robots.txt` once and respects `Disallow` rules for `LaunchCheckBot`,
+   - discovers up to 15 same-origin `<script src>` / `modulepreload` URLs and fetches
+     them at concurrency 4 within a 25-second budget,
+   - runs the registered site checks (`lib/scanner/registry.ts`) in parallel with a
+     5-second per-check timeout — a failing check becomes a `check_errored` info
+     finding and never fails the scan,
+   - replaces the scan's `findings` rows (delete-then-insert, safe to retry) and
+     returns only `{ findingCount }`.
+4. `finalize` — marks the scan completed.
+
+Phase 2A ships exactly one check: `site.headers.hsts` (missing or weak
+`Strict-Transport-Security`). Findings are stored with secrets redacted and are
+surfaced on `/scan/<id>` as severity counts plus the top finding titles once the
+scan completes; the full report arrives in a later phase.
+
+Repo scans skip `scan-site` entirely until Phase 3.
+
+## Running a scan locally
 
 Scans are queued through [Inngest](https://www.inngest.com/). To process them locally:
 

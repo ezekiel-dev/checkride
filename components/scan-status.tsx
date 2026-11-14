@@ -4,10 +4,15 @@ import { useQuery } from "@tanstack/react-query";
 import { Check, Loader2, X } from "lucide-react";
 import Link from "next/link";
 import { useEffect, useState } from "react";
+import { SeverityBadge } from "@/components/severity-badge";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
+import { SEVERITIES } from "@/lib/scanner/severity";
 import { type ScanMode, stepStates, stepsForMode } from "@/lib/scanner/steps";
+import type { Severity } from "@/lib/scanner/types";
 import { cn } from "@/lib/utils";
+
+type TopFinding = { severity: Severity; title: string };
 
 type ScanState =
   | {
@@ -17,6 +22,8 @@ type ScanState =
       step: string | null;
       mode?: ScanMode | null;
       createdAt?: string | null;
+      counts?: Record<Severity, number> | null;
+      topFindings?: TopFinding[] | null;
     }
   | { kind: "not_found" };
 
@@ -43,6 +50,8 @@ export function ScanStatus({ scanId }: { scanId: string }) {
         step: string | null;
         mode?: ScanMode | null;
         createdAt?: string | null;
+        counts?: Record<Severity, number> | null;
+        topFindings?: TopFinding[] | null;
       };
       return { kind: "ok", ...body };
     },
@@ -140,12 +149,49 @@ export function ScanStatus({ scanId }: { scanId: string }) {
   }
 
   if (scan?.status === "completed") {
+    const counts = scan.counts;
+    const topFindings = scan.topFindings ?? [];
+    const totalFindings = counts ? SEVERITIES.reduce((sum, s) => sum + counts[s], 0) : 0;
+
     return (
       <section>
         <h1 className="font-display text-3xl tracking-tight text-ink">Scan complete</h1>
-        <p className="mt-4 max-w-[52ch] text-ink-muted">
-          Scan complete (no checks yet). Findings and scoring arrive in a later phase.
-        </p>
+
+        {counts ? (
+          <div className="mt-6">
+            <h2 className="text-lg font-medium text-ink">Potential issues found</h2>
+            {totalFindings === 0 ? (
+              <p className="mt-3 text-ink-muted">No potential issues found by these checks.</p>
+            ) : (
+              <>
+                <ul className="mt-4 flex flex-wrap gap-2" aria-label="Findings by severity">
+                  {SEVERITIES.filter((s) => counts[s] > 0).map((s) => (
+                    <li key={s} className="flex items-center gap-2">
+                      <SeverityBadge severity={s} />
+                      <span className="font-mono text-sm text-ink-muted">×{counts[s]}</span>
+                    </li>
+                  ))}
+                </ul>
+                {topFindings.length > 0 ? (
+                  <ul className="mt-5 flex max-w-[52ch] flex-col gap-2">
+                    {topFindings.map((finding, index) => (
+                      <li key={`${finding.severity}-${index}`} className="flex items-start gap-3">
+                        <SeverityBadge severity={finding.severity} className="mt-0.5 shrink-0" />
+                        <span className="text-sm text-ink">{finding.title}</span>
+                      </li>
+                    ))}
+                  </ul>
+                ) : null}
+                <p className="mt-5 text-sm text-ink-muted">Full details arrive with the report.</p>
+              </>
+            )}
+          </div>
+        ) : (
+          <p className="mt-4 max-w-[52ch] text-ink-muted">
+            Scan complete (no checks yet). Findings and scoring arrive in a later phase.
+          </p>
+        )}
+
         <Button asChild variant="outline" className="mt-6">
           <Link href="/">Run another scan</Link>
         </Button>

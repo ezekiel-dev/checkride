@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { findings as findingsTable } from "@/lib/db/schema";
 import { hashAnonToken } from "@/lib/scan-token";
 
 const SCAN_ID = "11111111-2222-3333-4444-555555555555";
@@ -7,21 +8,25 @@ const OTHER_TOKEN = "other-token-xyz";
 
 const mocks = vi.hoisted(() => ({
   rows: [] as Record<string, unknown>[],
+  findingRows: [] as { severity: string; title: string }[],
   dbError: null as Error | null,
 }));
 
 vi.mock("@/lib/db", () => ({
   getDb: () => ({
     select: () => ({
-      from: () => ({
-        where: () => ({
-          limit: async () => {
+      from: (table: unknown) => ({
+        where: () => {
+          const isFindings = table === findingsTable;
+          const promise = Promise.resolve().then(() => {
             if (mocks.dbError) {
               throw mocks.dbError;
             }
-            return mocks.rows;
-          },
-        }),
+            return isFindings ? mocks.findingRows : mocks.rows;
+          });
+          // Scans query chains .limit(1); the findings summary awaits directly.
+          return Object.assign(promise, { limit: () => promise });
+        },
       }),
     }),
   }),
@@ -55,6 +60,7 @@ async function callGet(id: string, token?: string) {
 
 beforeEach(() => {
   mocks.rows.length = 0;
+  mocks.findingRows.length = 0;
   mocks.dbError = null;
 });
 
@@ -119,6 +125,49 @@ describe("GET /api/scans/[id]", () => {
     const response = await callGet(SCAN_ID, OWNER_TOKEN);
     expect(response.status).toBe(200);
     expect(((await response.json()) as { mode: unknown }).mode).toBe(expected);
+  });
+
+  it("returns counts and topFindings for a completed scan, without evidence or location", async () => {
+    mocks.rows.push(
+      makeScanRow({
+        status: "completed",
+        step: null,
+        completedAt: new Date("2026-01-02T03:05:05.000Z"),
+      }),
+    );
+    mocks.findingRows.push(
+      { severity: "info", title: "snapshot note" },
+      { severity: "low", title: "weak hsts" },
+      { severity: "critical", title: "exposed key" },
+      { severity: "high", title: "missing csp" },
+      { severity: "medium", title: "missing hsts" },
+    );
+
+    const response = await callGet(SCAN_ID, OWNER_TOKEN);
+    expect(response.status).toBe(200);
+
+    const body = (await response.json()) as Record<string, unknown>;
+    expect(body.counts).toEqual({ critical: 1, high: 1, medium: 1, low: 1, info: 1 });
+    expect(body.topFindings).toEqual([
+      { severity: "critical", title: "exposed key" },
+      { severity: "high", title: "missing csp" },
+      { severity: "medium", title: "missing hsts" },
+    ]);
+    // No findings internals may leak through this endpoint.
+    expect(JSON.stringify(body)).not.toContain("evidence");
+    expect(JSON.stringify(body)).not.toContain("location");
+    expect(JSON.stringify(body)).not.toContain("checkId");
+    expect(JSON.stringify(body)).not.toContain("confidence");
+  });
+
+  it("omits counts and topFindings while the scan is still running", async () => {
+    mocks.rows.push(makeScanRow({ status: "running" }));
+    mocks.findingRows.push({ severity: "high", title: "should not appear" });
+
+    const response = await callGet(SCAN_ID, OWNER_TOKEN);
+    const body = (await response.json()) as Record<string, unknown>;
+    expect(body).not.toHaveProperty("counts");
+    expect(body).not.toHaveProperty("topFindings");
   });
 
   it("returns a generic 500 when the database fails", async () => {

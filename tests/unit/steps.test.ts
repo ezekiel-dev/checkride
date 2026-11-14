@@ -1,11 +1,22 @@
 import { describe, expect, it } from "vitest";
 import { SCAN_STEPS, STEP, stepStates, stepsForMode } from "@/lib/scanner/steps";
 
+const SITE_STEP_IDS = ["queued", STEP.validate, STEP.running, STEP.scanSite, STEP.finalize];
+const ALWAYS_STEP_IDS = ["queued", STEP.validate, STEP.running, STEP.finalize];
+
 describe("stepsForMode", () => {
-  it("returns only steps the pipeline actually runs, for every mode", () => {
-    for (const mode of ["site", "repo", "both", null, undefined] as const) {
-      const ids = stepsForMode(mode).map((s) => s.id);
-      expect(ids).toEqual(["queued", STEP.validate, STEP.running, STEP.finalize]);
+  it("returns the site scan steps for site and both modes", () => {
+    expect(stepsForMode("site").map((s) => s.id)).toEqual(SITE_STEP_IDS);
+    expect(stepsForMode("both").map((s) => s.id)).toEqual(SITE_STEP_IDS);
+  });
+
+  it("returns only the always steps for repo scans", () => {
+    expect(stepsForMode("repo").map((s) => s.id)).toEqual(ALWAYS_STEP_IDS);
+  });
+
+  it("returns only the always steps when the mode is missing", () => {
+    for (const mode of [null, undefined] as const) {
+      expect(stepsForMode(mode).map((s) => s.id)).toEqual(ALWAYS_STEP_IDS);
     }
   });
 
@@ -32,11 +43,12 @@ describe("stepsForMode", () => {
 });
 
 describe("stepStates", () => {
-  const steps = SCAN_STEPS;
+  const steps = stepsForMode("site");
 
   it("marks only the first step active when queued with no step yet", () => {
     expect(stepStates(steps, { status: "queued", step: null })).toEqual([
       "active",
+      "pending",
       "pending",
       "pending",
       "pending",
@@ -49,6 +61,7 @@ describe("stepStates", () => {
       "active",
       "pending",
       "pending",
+      "pending",
     ]);
   });
 
@@ -58,8 +71,17 @@ describe("stepStates", () => {
       "done",
       "active",
       "pending",
+      "pending",
+    ]);
+    expect(stepStates(steps, { status: "running", step: STEP.scanSite })).toEqual([
+      "done",
+      "done",
+      "done",
+      "active",
+      "pending",
     ]);
     expect(stepStates(steps, { status: "running", step: STEP.finalize })).toEqual([
+      "done",
       "done",
       "done",
       "done",
@@ -79,12 +101,14 @@ describe("stepStates", () => {
         "done",
         "done",
         "done",
+        "done",
       ]);
     }
   });
 
   it("marks the step that was active as failed when the scan failed", () => {
-    expect(stepStates(steps, { status: "failed", step: STEP.running })).toEqual([
+    expect(stepStates(steps, { status: "failed", step: STEP.scanSite })).toEqual([
+      "done",
       "done",
       "done",
       "failed",
@@ -94,5 +118,9 @@ describe("stepStates", () => {
 
   it("handles an empty step list", () => {
     expect(stepStates([], { status: "running", step: null })).toEqual([]);
+  });
+
+  it("keeps SCAN_STEPS and stepsForMode in sync", () => {
+    expect(SCAN_STEPS.length).toBe(stepsForMode("both").length);
   });
 });

@@ -54,3 +54,30 @@
 | GET `/api/scans/[id]` derives `mode` from stored URLs and returns `Cache-Control: no-store` | The UI needs the mode to render the right checklist; URLs, token hash, and error text are never exposed |
 | `anonTokenHashEquals` returns false for empty inputs | An empty stored hash or cookie must never compare equal, even to another empty string |
 | Elapsed timer computes from server `createdAt` | A page reload mid-scan no longer resets the `T+MM:SS` timer |
+
+## 2026-11-13 — Phase 2A check framework, snapshot, persistence
+
+| Decision | Reason |
+|---|---|
+| `RawFinding.evidence` is already redacted; persistence truncates it to 500 chars and `location` to 300 | SPEC 4.3 redaction rule; column caps keep rows small (AGENTS free-tier discipline) |
+| Snapshot treats home-page HTTP status >= 400 as `site_unreachable` | `safeFetch` returns `ok: true` for HTTP errors; a scanner should not report on an error page |
+| Snapshot notes become `info` findings with `checkId: "site.snapshot.notes"`, category `reliability` | SPEC requires skipped-fetch budgets to surface as info findings; reliability is the closest category for fetch-budget notes |
+| Script discovery uses regex over `<script src>` and `<link rel="modulepreload">`, resolved against `finalUrl`, same-origin only, deduped, capped at 15 | SPEC 4.3 budgets; no HTML-parser dependency allowed |
+| robots.txt disallows are checked per script path for `LaunchCheckBot`, with `*` groups as fallback and longest-match/allow-tie precedence | SPEC 7.4 + 4.3; missing/garbage robots.txt means allow all |
+| Script fetches run at concurrency 4 with a shared deadline checked before each fetch; leftovers are counted once as skipped | SPEC 4.3 budgets; avoids double-counting when several workers hit the deadline |
+| `persistFindings` uses a transaction only when the driver supports it; neon-http's `transaction()` exists but always throws "No transactions support", so it falls back to sequential delete+insert | SPEC requires idempotent persistence; delete-then-insert is already idempotent, the transaction is only an optimization where available |
+| `runChecks` normalizes `finding.checkId` to the check's own id and converts throws/timeouts into a single `check_errored` info finding | SPEC 4.3: one bad check must never fail the scan |
+| `maxDuration = 60` exported from `/api/inngest` | Inngest sync + snapshot/check work can exceed the default serverless limit; noted if the Next 16 build rejects the segment config |
+| HSTS "weak" finding uses severity `low`, confidence `high` | Prompt's "low/high-confidence" read parallel to "medium/high-confidence" = severity/confidence pair; SPEC 4.1 lists hsts guidance as medium overall |
+| Fixture server is plain HTTP, so scheme-dependent checks (HSTS) self-skip in fixture-server tests; HTTPS behavior is tested via a stub fetcher reporting an `https://` `finalUrl` | `safeFetch` cannot do TLS to the fixture server; stubbing `finalUrl` exercises the same check logic without real network |
+
+## 2026-11-13 — Phase 2A follow-up: batch persist, snapshot budgets, retries
+
+| Decision | Reason |
+|---|---|
+| `persistFindings` uses `db.batch([delete, insert])` (delete only when empty) instead of a transaction | drizzle-orm 0.44.5 neon-http supports `batch` (single HTTP round-trip); removes the transaction try/catch entirely |
+| `location` stored as `origin + pathname` when it parses as a URL, else truncated to 300 | Query strings/fragments can carry tokens (`?token=...`) |
+| `title` capped at 200 chars | Keeps finding rows small; titles are display strings |
+| Script responses skipped when `finalUrl` origin differs from the page origin or content-type is image/video/audio/font | safeFetch follows redirects; off-origin or binary responses are not useful scan input |
+| 25 MB total byte budget across HTML + script bodies, checked before each script fetch | SPEC 4.3 budget; shared counter may overshoot by one in-flight batch — accepted as a guard, not a hard cap |
+| `retries: 2` on `scan.run` | Explicit cap instead of the SDK default; transient errors get two retries before `onFailure` marks the scan failed |
