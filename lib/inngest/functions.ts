@@ -30,20 +30,26 @@ async function markScanFailed(db: Db, scanId: string) {
 }
 
 /**
- * scan.run — pipeline skeleton (Phase 1B). Steps are coarse on purpose
- * (Inngest free tier); real checks land in later phases.
+ * scan.run — current pipeline (Phase 2A):
+ *   validate-and-resolve → mark-running → scan-site (site scans only) → finalize
+ *
+ * scan-site builds the site snapshot, runs the registered site checks, and
+ * idempotently replaces this scan's findings rows inside ONE step, returning
+ * only { findingCount } so step output stays small. Repo checks land in
+ * Phase 3; scoring/AI in Phase 4.
  *
  * Failure handling:
- * - Transient errors are retried by Inngest (default: 4 retries). We do NOT mark the
+ * - Transient errors are retried by Inngest (2 retries). We do NOT mark the
  *   scan failed on the first error, because the UI treats "failed" as final.
- * - Permanent problems (bad payload, missing scan, invalid stored URL) throw
- *   NonRetriableError so they fail immediately instead of retrying pointlessly.
+ * - Permanent problems (bad payload, missing scan, invalid stored URL,
+ *   unreachable site) throw NonRetriableError so they fail immediately.
  * - onFailure runs once, after the final failure, and marks the scan failed.
  *   The scans.step value is kept so the UI can show which step failed.
  */
 export const scanRun = inngest.createFunction(
   {
     id: "scan.run",
+    retries: 2,
     triggers: [{ event: "scan/requested" }],
     onFailure: async ({ event, step }) => {
       // The failed function's original event is nested inside the failure event.

@@ -5,6 +5,10 @@ const USER_AGENT = "LaunchCheckBot";
 const MAX_SCRIPTS = 15;
 const SCRIPT_CONCURRENCY = 4;
 const DEFAULT_DEADLINE_MS = 25_000;
+/** Total download budget across the HTML and all script bodies. */
+const MAX_TOTAL_BYTES = 25 * 1024 * 1024;
+/** Content types that are never useful as scan input. */
+const SKIPPED_CONTENT_TYPES = /^(image|video|audio|font)\//i;
 
 export type SnapshotOptions = {
   deadlineMs?: number;
@@ -130,28 +134,59 @@ export async function buildSiteSnapshot(
       );
     }
 
+    const pageOrigin = new URL(home.finalUrl).origin;
     const scripts: SiteScript[] = [];
     let fetchFailures = 0;
     let index = 0;
+    // Approximate shared byte counter: workers may overshoot by at most one
+    // in-flight batch, which is acceptable for a budget guard.
+    let totalBytes = home.body.length;
+    let hitDeadline = false;
+    let hitByteBudget = false;
 
     const worker = async () => {
       while (index < queued.length) {
         if (now() >= deadline) {
+          hitDeadline = true;
+          return;
+        }
+        if (totalBytes >= MAX_TOTAL_BYTES) {
+          hitByteBudget = true;
           return;
         }
         const url = queued[index];
         index += 1;
         try {
           const res = await fetcher(url);
-          if (res.ok) {
-            scripts.push({
-              url,
-              body: res.body.toString("utf8"),
-              truncated: res.truncated,
-            });
-          } else {
+          if (!res.ok) {
             fetchFailures += 1;
+            continue;
           }
+          totalBytes += res.body.length;
+
+          // Skip responses that redirected off-origin or are not textual code.
+          let finalOrigin: string | null = null;
+          try {
+            finalOrigin = new URL(res.finalUrl).origin;
+          } catch {
+            finalOrigin = null;
+          }
+          const contentTypeHeader = res.headers["content-type"];
+          const contentType = Array.isArray(contentTypeHeader)
+            ? contentTypeHeader[0]
+            : contentTypeHeader;
+          if (
+            finalOrigin !== pageOrigin ||
+            (contentType && SKIPPED_CONTENT_TYPES.test(contentType))
+          ) {
+            continue;
+          }
+
+          scripts.push({
+            url,
+            body: res.body.toString("utf8"),
+            truncated: res.truncated,
+          });
         } catch {
           fetchFailures += 1;
         }
@@ -169,8 +204,15 @@ export async function buildSiteSnapshot(
     // skipped because the deadline hit mid-batch.
     const deadlineSkipped = queued.length - index;
     if (deadlineSkipped > 0) {
+      const reasons: string[] = [];
+      if (hitDeadline) {
+        reasons.push(`the ${Math.round(deadlineMs / 1000)}s scan budget was reached`);
+      }
+      if (hitByteBudget) {
+        reasons.push("the 25 MB download budget was reached");
+      }
       notes.push(
-        `Skipped ${deadlineSkipped} script file(s): the ${Math.round(deadlineMs / 1000)}s scan budget was reached.`,
+        `Skipped ${deadlineSkipped} script file(s): ${reasons.join(" and ") || "a scan budget was reached"}.`,
       );
     }
     if (fetchFailures > 0) {

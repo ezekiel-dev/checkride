@@ -9,6 +9,7 @@ const { findings } = schema;
 export type Db = NeonHttpDatabase<typeof schema>;
 
 const MAX_EVIDENCE_LENGTH = 500;
+const MAX_TITLE_LENGTH = 200;
 const MAX_LOCATION_LENGTH = 300;
 const TOP_FINDINGS_LIMIT = 3;
 
@@ -17,37 +18,26 @@ export type FindingSummary = {
   topFindings: { severity: Severity; title: string }[];
 };
 
-type TransactionCapable = {
-  transaction?: (fn: (tx: Db) => Promise<void>) => Promise<void>;
-};
-
-async function replaceFindings(db: Db, scanId: string, rows: (typeof findings.$inferInsert)[]) {
-  const work = async (target: Db) => {
-    await target.delete(findings).where(eq(findings.scanId, scanId));
-    if (rows.length > 0) {
-      await target.insert(findings).values(rows);
-    }
-  };
-
-  const maybeTx = db as unknown as TransactionCapable;
-  if (typeof maybeTx.transaction === "function") {
-    try {
-      await maybeTx.transaction((tx) => work(tx));
-      return;
-    } catch (error) {
-      // neon-http exposes transaction() but always throws "No transactions
-      // support"; fall back to sequential delete+insert, which is idempotent.
-      if (!(error instanceof Error && error.message.includes("No transactions support"))) {
-        throw error;
-      }
-    }
+/**
+ * Location is stored as origin + pathname only (no query string or fragment,
+ * which can carry tokens). Non-URL locations fall back to a plain truncation.
+ */
+function sanitizeLocation(location: string | undefined): string | null {
+  if (!location) {
+    return null;
   }
-  await work(db);
+  try {
+    const url = new URL(location);
+    return `${url.origin}${url.pathname}`;
+  } catch {
+    return location.slice(0, MAX_LOCATION_LENGTH);
+  }
 }
 
 /**
- * Idempotently replace a scan's findings: delete existing rows, then insert.
- * Safe to retry — a retried step never produces duplicates.
+ * Idempotently replace a scan's findings in ONE batched request: the delete is
+ * scoped to this scan_id and the insert only runs when there are rows. Safe to
+ * retry — a retried step never produces duplicates.
  */
 export async function persistFindings(
   db: Db,
@@ -60,12 +50,17 @@ export async function persistFindings(
     category: finding.category,
     severity: finding.severity,
     confidence: finding.confidence,
-    title: finding.title,
+    title: finding.title.slice(0, MAX_TITLE_LENGTH),
     evidenceRedacted: finding.evidence.slice(0, MAX_EVIDENCE_LENGTH),
-    location: finding.location ? finding.location.slice(0, MAX_LOCATION_LENGTH) : null,
+    location: sanitizeLocation(finding.location),
   }));
 
-  await replaceFindings(db, scanId, rows);
+  const deleteQuery = db.delete(findings).where(eq(findings.scanId, scanId));
+  if (rows.length > 0) {
+    await db.batch([deleteQuery, db.insert(findings).values(rows)]);
+  } else {
+    await db.batch([deleteQuery]);
+  }
 }
 
 /** Severity counts plus up to 3 highest-severity non-info finding titles. */
